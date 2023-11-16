@@ -1,2 +1,3 @@
-# webgc
-Web based ground control station using mavlink
+# MAVLink-API
+
+API for MAVLink using FastAPI
