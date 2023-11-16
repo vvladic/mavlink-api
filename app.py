@@ -1,26 +1,31 @@
 import socket
 import asyncio
-import mavlink
 import uvicorn
 
+# import mavlink
+
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI, WebSocket, Request, HTTPException
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
 
+HOST = "192.168.2.196"
+
+
 class MavTcp:
-    RX_BUFFER_SIZE = 1024
-    TX_BUFFER_SIZE = 1024
+    QUEUE_SIZE = 512
+    RX_BUFFER_SIZE = 8192
+    TX_BUFFER_SIZE = 8192
 
     def __init__(self, host: str = "127.0.0.1", port=5760) -> None:
         self.host = host
         self.port = port
-        self.mav = mavlink.MAVLink(None, 253, 0)
+        # self.mav = mavlink.MAVLink(None, 253, 0)
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-        self.queue = asyncio.Queue(8192)
+        self.queue = asyncio.Queue(self.QUEUE_SIZE)
 
         # self.queues: dict[int, asyncio.Queue] = {}
         # for msgId in mavlink.mavlink_map.keys():
@@ -45,23 +50,29 @@ class MavTcp:
         while True:
             try:
                 data = self.socket.recv(self.RX_BUFFER_SIZE)
+                print(f"data size: {len(data)}")
                 if not data:
                     await asyncio.sleep(0.01)
                     continue
-                parsed = self.mav.parse_buffer(data)
-                if not parsed:
-                    await asyncio.sleep(0.1)
-                    continue
-                for msg in parsed:
-                    if isinstance(msg, mavlink.MAVLink_message):
-                        msgId = msg.get_msgId()
-                        msgSeq = msg.get_seq()
-                        print(msg.msgname, msgId, msgSeq)
-                        try:
-                            self.queue.put_nowait(msg.to_json())
-                        except Exception as e:
-                            break
-                await asyncio.sleep(0.01)
+                # parsed = self.mav.parse_buffer(data)
+                # if not parsed:
+                #     await asyncio.sleep(0.1)
+                #     continue
+                # for msg in parsed:
+                #     if isinstance(msg, mavlink.MAVLink_message):
+                #         msgId = msg.get_msgId()
+                #         msgSeq = msg.get_seq()
+                #         # print(msg.msgname, msgId, msgSeq)
+                #         try:
+                #             self.queue.put_nowait(msg.to_json())
+                #         except Exception as e:
+                #             break
+                payload = data.hex()
+
+                if self.queue.full():
+                    self.queue.get_nowait()
+                self.queue.put_nowait(payload)
+                await asyncio.sleep(0.05)
             except Exception as e:
                 print(f"Parsing exception: {e}")
                 await self.reconnect()
@@ -91,7 +102,7 @@ class MavTcp:
         return self.create_generator(self.queue)
 
 
-sp = MavTcp("192.168.2.196")
+sp = MavTcp(HOST)
 
 
 @asynccontextmanager
@@ -122,6 +133,21 @@ async def root():
 async def telemetry_stream():
     res = EventSourceResponse(sp.telemetry())
     return res
+
+
+@app.get("/data", response_class=StreamingResponse)
+async def data_stream():
+    res = EventSourceResponse(sp.telemetry())
+    return res
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    print("aaaaaaaaaaaaaaaaaaaaa")
+    await websocket.accept()
+    while True:
+        async for data in sp.telemetry():
+            await websocket.send_text(data)
 
 
 if __name__ == "__main__":
